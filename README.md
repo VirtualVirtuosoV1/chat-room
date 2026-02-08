@@ -18,7 +18,25 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Supabase Realtime Setup
+
+1. Create a Supabase project.
+2. Copy your Project URL and Publishable/Anon Key.
+3. Create a `.env.local` file:
+
+```bash
+NEXT_PUBLIC_SUPABASE_URL=your_supabase_project_url
+NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=your_supabase_publishable_key
+# or NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
+```
+
+4. Install dependencies:
+
+```bash
+npm install
+```
+
+Supabase Realtime Broadcast and Presence are enabled by default, so no database tables are required for this demo.
 
 ## Learn More
 
@@ -34,3 +52,5 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+
+When deploying, add `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` (or `NEXT_PUBLIC_SUPABASE_ANON_KEY`) to your Vercel project environment variables so the browser can connect to Supabase.
