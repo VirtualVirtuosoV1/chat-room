@@ -39,6 +39,13 @@ type RoomAssignmentResponse = {
   capacity?: number;
 };
 
+type ConnectedUser = {
+  id: string;
+  name: string;
+  displayName: string;
+  isSelf: boolean;
+};
+
 function timestamp() {
   return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
@@ -116,7 +123,7 @@ export default function Home() {
   const [showNamePrompt, setShowNamePrompt] = useState<boolean>(true);
   const [clientId, setClientId] = useState<string>("");
   const [room, setRoom] = useState<string | null>(null);
-  const [connected, setConnected] = useState<string[]>([]);
+  const [connected, setConnected] = useState<ConnectedUser[]>([]);
   const [isSubscribed, setIsSubscribed] = useState<boolean>(false);
   const [isJoined, setIsJoined] = useState<boolean>(false);
   const [mutedUsers, setMutedUsers] = useState<Record<string, number>>({});
@@ -406,19 +413,40 @@ export default function Home() {
 
     channel.on("presence", { event: "sync" }, () => {
       const state = channel.presenceState() as Record<string, { name?: string }[]>;
-      const names = new Set<string>();
+      const users: Array<{ id: string; name: string; isSelf: boolean }> = [];
 
-      Object.values(state).forEach((entries) => {
-        entries.forEach((entry) => {
-          if (entry?.name) {
-            names.add(entry.name);
-          }
+      Object.entries(state).forEach(([presenceKey, entries]) => {
+        entries.forEach((entry, index) => {
+          const trimmedName = entry?.name?.trim();
+          if (!trimmedName) return;
+          users.push({
+            id: `${presenceKey}-${index}`,
+            name: trimmedName,
+            isSelf: presenceKey === clientIdRef.current,
+          });
         });
       });
 
-      const list = Array.from(names);
-      setConnected(list);
-      setIsJoined(nameRef.current ? list.includes(nameRef.current) : false);
+      users.sort((a, b) => {
+        const nameComparison = a.name.localeCompare(b.name);
+        if (nameComparison !== 0) return nameComparison;
+        return a.id.localeCompare(b.id);
+      });
+
+      const countsByName: Record<string, number> = {};
+      const labelledUsers: ConnectedUser[] = users.map((user) => {
+        const seen = (countsByName[user.name] ?? 0) + 1;
+        countsByName[user.name] = seen;
+        return {
+          id: user.id,
+          name: user.name,
+          displayName: seen === 1 ? user.name : `${user.name} (${seen})`,
+          isSelf: user.isSelf,
+        };
+      });
+
+      setConnected(labelledUsers);
+      setIsJoined(labelledUsers.some((user) => user.isSelf));
     });
 
     channel.subscribe((status) => {
@@ -625,10 +653,10 @@ export default function Home() {
               <h3 className="text-lg font-semibold">Who&apos;s here</h3>
               <ul className="mt-4 space-y-3 text-sm">
                 {connected.map((person) => (
-                  <li key={person} className="flex items-center justify-between rounded-full bg-slate-900/70 px-4 py-2">
+                  <li key={person.id} className="flex items-center justify-between rounded-full bg-slate-900/70 px-4 py-2">
                     <span>
-                      {person}
-                      {person === name ? " (you)" : ""}
+                      {person.displayName}
+                      {person.isSelf ? " (you)" : ""}
                     </span>
                     <span className="text-emerald-300">●</span>
                   </li>
