@@ -11,6 +11,50 @@ const MEMBER_STALE_MS = 45_000;
 const DEFAULT_ROOM_CAPACITY = 5;
 const MAX_ROOM_CAPACITY = 25;
 const MAX_CLIENT_ID_LENGTH = 120;
+const ROOM_ADJECTIVES = [
+  "amber",
+  "autumn",
+  "cedar",
+  "cloud",
+  "crystal",
+  "golden",
+  "harbor",
+  "lunar",
+  "maple",
+  "misty",
+  "ocean",
+  "pine",
+  "quiet",
+  "river",
+  "silver",
+  "stone",
+  "sunny",
+  "velvet",
+  "wild",
+  "willow",
+];
+const ROOM_NOUNS = [
+  "bay",
+  "bluff",
+  "canyon",
+  "commons",
+  "cove",
+  "creek",
+  "forest",
+  "garden",
+  "grove",
+  "harbor",
+  "hollow",
+  "lagoon",
+  "meadow",
+  "plaza",
+  "ridge",
+  "shore",
+  "summit",
+  "trail",
+  "valley",
+  "wharf",
+];
 
 type RequestBody = {
   action?: "list_mutes" | "mute" | "assign_room" | "touch_member";
@@ -96,19 +140,60 @@ function normalizeClientId(rawClientId?: string | null): string | null {
   return trimmed.slice(0, MAX_CLIENT_ID_LENGTH);
 }
 
-function roomFromIndex(index: number): string {
-  if (index <= 1) return DEFAULT_ROOM;
-  return `${DEFAULT_ROOM}-${index}`;
+function buildRoomNamePool(): string[] {
+  const rooms: string[] = [];
+  const seen = new Set<string>();
+
+  const addRoom = (room: string) => {
+    if (!room || seen.has(room)) return;
+    seen.add(room);
+    rooms.push(room);
+  };
+
+  addRoom(DEFAULT_ROOM);
+
+  ROOM_ADJECTIVES.forEach((adjective) => {
+    ROOM_NOUNS.forEach((noun) => {
+      addRoom(`${adjective}-${noun}`);
+    });
+  });
+
+  return rooms;
+}
+
+const ROOM_NAME_POOL = buildRoomNamePool();
+
+function randomIndex(maxExclusive: number): number {
+  if (maxExclusive <= 1) return 0;
+  const buffer = new Uint32Array(1);
+  crypto.getRandomValues(buffer);
+  return buffer[0] % maxExclusive;
 }
 
 function pickAvailableRoom(counts: Record<string, number>, roomCapacity: number): string {
-  for (let index = 1; index <= 200; index += 1) {
-    const room = roomFromIndex(index);
-    if ((counts[room] ?? 0) < roomCapacity) {
-      return room;
-    }
+  if ((counts[DEFAULT_ROOM] ?? 0) < roomCapacity) {
+    return DEFAULT_ROOM;
   }
-  return roomFromIndex(201);
+
+  const partiallyFilled = Object.entries(counts)
+    .filter(([roomName, count]) => roomName !== DEFAULT_ROOM && count > 0 && count < roomCapacity)
+    .map(([roomName]) => roomName);
+
+  if (partiallyFilled.length > 0) {
+    return partiallyFilled[randomIndex(partiallyFilled.length)];
+  }
+
+  const unusedNamedRooms = ROOM_NAME_POOL.filter((roomName) => roomName !== DEFAULT_ROOM && !counts[roomName]);
+  if (unusedNamedRooms.length > 0) {
+    return unusedNamedRooms[randomIndex(unusedNamedRooms.length)];
+  }
+
+  const availableNamedRooms = ROOM_NAME_POOL.filter((roomName) => (counts[roomName] ?? 0) < roomCapacity);
+  if (availableNamedRooms.length > 0) {
+    return availableNamedRooms[randomIndex(availableNamedRooms.length)];
+  }
+
+  return `room-${Date.now().toString(36)}-${Math.floor(Math.random() * 10_000).toString(36)}`;
 }
 
 Deno.serve(async (req) => {
