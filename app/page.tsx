@@ -349,12 +349,12 @@ export default function Home() {
   };
 
   return (
-    <div className={`${displayFont.className} h-screen overflow-hidden bg-gradient-to-br from-slate-950 via-slate-900 to-slate-800 text-slate-100`}>
-      <div className="mx-auto flex h-full max-w-6xl flex-col px-6 py-10">
-        <header className="mb-6 flex flex-col gap-3">
+    <div className={`${displayFont.className} min-h-screen overflow-x-hidden bg-gradient-to-br from-slate-950 via-slate-900 to-slate-800 text-slate-100 lg:h-screen lg:overflow-hidden`}>
+      <div className="mx-auto flex min-h-screen max-w-6xl flex-col px-4 py-6 sm:px-6 sm:py-8 lg:h-full lg:min-h-0 lg:py-10">
+        <header className="mb-5 flex flex-col gap-3 sm:mb-6">
           <p className="text-sm uppercase tracking-[0.3em] text-slate-400">Live room</p>
-          <h1 className="text-4xl font-semibold">Chatroom</h1>
-          <p className={`${bodyFont.className} max-w-2xl text-lg text-slate-300`}>
+          <h1 className="text-3xl font-semibold sm:text-4xl">Chatroom</h1>
+          <p className={`${bodyFont.className} max-w-2xl text-base text-slate-300 sm:text-lg`}>
             A lightweight space to exchange notes in real time. Pick a name to join the conversation.
           </p>
         </header>
@@ -366,8 +366,8 @@ export default function Home() {
           </div>
         )}
 
-        <section className="grid min-h-0 flex-1 gap-6 overflow-hidden lg:grid-cols-[minmax(0,1fr)_280px]">
-          <div className="flex min-h-0 flex-col overflow-hidden rounded-3xl border border-slate-800 bg-slate-950/70 p-6 shadow-2xl shadow-slate-950/40">
+        <section className="grid gap-6 lg:min-h-0 lg:flex-1 lg:overflow-hidden lg:grid-cols-[minmax(0,1fr)_280px]">
+          <div className="rounded-3xl border border-slate-800 bg-slate-950/70 p-4 shadow-2xl shadow-slate-950/40 sm:p-6 lg:flex lg:min-h-0 lg:flex-col lg:overflow-hidden">
             <div className="mb-6 flex items-center justify-between">
               <div>
                 <h2 className="text-xl font-medium">Conversation</h2>
@@ -378,7 +378,7 @@ export default function Home() {
               </span>
             </div>
 
-            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-2">
+            <div className="max-h-[44vh] space-y-4 overflow-y-auto pr-1 sm:pr-2 lg:max-h-none lg:min-h-0 lg:flex-1">
               {messages.map((message) => (
                 <div key={message.id} className="rounded-2xl bg-slate-900/60 p-4">
                   <div className="flex items-center justify-between text-xs text-slate-400">
@@ -434,8 +434,8 @@ export default function Home() {
             </div>
           </div>
 
-          <aside className="flex min-h-0 flex-col gap-6 overflow-hidden">
-            <div className="rounded-3xl border border-slate-800 bg-slate-950/70 p-6">
+          <aside className="flex flex-col gap-6 lg:min-h-0 lg:overflow-hidden">
+            <div className="rounded-3xl border border-slate-800 bg-slate-950/70 p-4 sm:p-6">
               <h3 className="text-lg font-semibold">Who&apos;s here</h3>
               <ul className="mt-4 space-y-3 text-sm">
                 {connected.map((person) => (
@@ -454,8 +454,8 @@ export default function Home() {
                 )}
               </ul>
             </div>
-            <div className="min-h-0 flex-1 space-y-6 overflow-y-auto pr-1">
-              <div className="rounded-3xl border border-slate-800 bg-slate-950/70 p-6">
+            <div className="space-y-6 lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:pr-1">
+              <div className="rounded-3xl border border-slate-800 bg-slate-950/70 p-4 sm:p-6">
                 <h3 className="text-lg font-semibold">Muted</h3>
                 <p className={`${bodyFont.className} mt-2 text-sm text-slate-400`}>
                   Users currently rate-limited for spam.
@@ -479,7 +479,7 @@ export default function Home() {
                   )}
                 </ul>
               </div>
-              <div className="rounded-3xl border border-slate-800 bg-gradient-to-br from-slate-900 via-slate-900/70 to-slate-950 p-6">
+              <div className="rounded-3xl border border-slate-800 bg-gradient-to-br from-slate-900 via-slate-900/70 to-slate-950 p-4 sm:p-6">
                 <h3 className="text-lg font-semibold">Room rules</h3>
                 <ul className={`${bodyFont.className} mt-3 space-y-2 text-sm text-slate-300`}>
                   <li>Pick a display name to join.</li>
