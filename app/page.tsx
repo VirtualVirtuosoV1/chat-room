@@ -12,8 +12,8 @@ const supabaseKey =
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ?? "";
 
 const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
-const ROOM_NAME = "pine-grove";
-const ROOM_CHANNEL = `room:${ROOM_NAME}`;
+const DEFAULT_ROOM = "pine-grove";
+const ROOM_CAPACITY = 5;
 
 type Message = {
   id: string;
@@ -32,6 +32,13 @@ type ActiveMutesResponse = {
   mutes?: MutePayload[];
 };
 
+type RoomAssignmentResponse = {
+  room?: string;
+  assignment?: "preferred" | "existing" | "auto";
+  occupancy?: number;
+  capacity?: number;
+};
+
 function timestamp() {
   return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
@@ -41,6 +48,30 @@ function randomId() {
     return crypto.randomUUID();
   }
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function roomLabelFromSlug(room: string | null): string {
+  if (!room) return "Assigning room…";
+  return room
+    .split("-")
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
+function preferredRoomFromUrl(): string | undefined {
+  if (typeof window === "undefined") return undefined;
+  const params = new URLSearchParams(window.location.search);
+  const room = params.get("room")?.trim();
+  return room || undefined;
+}
+
+function writeRoomToUrl(room: string) {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  if (url.searchParams.get("room") === room) return;
+  url.searchParams.set("room", room);
+  window.history.replaceState(null, "", url.toString());
 }
 
 async function formatFunctionInvokeError(error: unknown, response?: Response): Promise<string> {
@@ -76,11 +107,14 @@ export default function Home() {
   const channelRef = useRef<RealtimeChannel | null>(null);
   const clientIdRef = useRef<string>("");
   const nameRef = useRef<string>("");
+  const roomRef = useRef<string | null>(null);
   const [name, setName] = useState<string>("");
   const [draftName, setDraftName] = useState<string>("");
   const [draftMessage, setDraftMessage] = useState<string>("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [showNamePrompt, setShowNamePrompt] = useState<boolean>(true);
+  const [clientId, setClientId] = useState<string>("");
+  const [room, setRoom] = useState<string | null>(null);
   const [connected, setConnected] = useState<string[]>([]);
   const [isSubscribed, setIsSubscribed] = useState<boolean>(false);
   const [isJoined, setIsJoined] = useState<boolean>(false);
@@ -91,12 +125,12 @@ export default function Home() {
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   const loadMutedUsers = async () => {
-    if (!supabase) return;
+    if (!supabase || !roomRef.current) return;
 
     const { data, error, response } = await supabase.functions.invoke<ActiveMutesResponse>("chat", {
       body: {
         action: "list_mutes",
-        room: ROOM_NAME,
+        room: roomRef.current,
       },
     });
 
@@ -122,12 +156,12 @@ export default function Home() {
   };
 
   const persistMute = async (payload: MutePayload) => {
-    if (!supabase) return;
+    if (!supabase || !roomRef.current) return;
 
     const { error, response } = await supabase.functions.invoke("chat", {
       body: {
         action: "mute",
-        room: payload.room ?? ROOM_NAME,
+        room: payload.room ?? roomRef.current,
         name: payload.name,
         mutedUntil: payload.mutedUntil,
       },
@@ -136,6 +170,53 @@ export default function Home() {
     if (error) {
       const details = await formatFunctionInvokeError(error, response);
       console.error("Failed to persist mute:", details);
+    }
+  };
+
+  const assignRoom = async (activeClientId: string) => {
+    if (!supabase) return;
+
+    const preferredRoom = preferredRoomFromUrl();
+    const { data, error, response } = await supabase.functions.invoke<RoomAssignmentResponse>("chat", {
+      body: {
+        action: "assign_room",
+        clientId: activeClientId,
+        preferredRoom,
+        roomCapacity: ROOM_CAPACITY,
+      },
+    });
+
+    if (error) {
+      const details = await formatFunctionInvokeError(error, response);
+      console.error("Failed to assign room:", details);
+
+      const fallbackRoom = preferredRoom ?? DEFAULT_ROOM;
+      roomRef.current = fallbackRoom;
+      setRoom(fallbackRoom);
+      writeRoomToUrl(fallbackRoom);
+      return;
+    }
+
+    const assignedRoom = data?.room ?? preferredRoom ?? DEFAULT_ROOM;
+    roomRef.current = assignedRoom;
+    setRoom(assignedRoom);
+    writeRoomToUrl(assignedRoom);
+  };
+
+  const touchRoomMember = async () => {
+    if (!supabase || !roomRef.current || !clientIdRef.current) return;
+
+    const { error, response } = await supabase.functions.invoke("chat", {
+      body: {
+        action: "touch_member",
+        clientId: clientIdRef.current,
+        room: roomRef.current,
+      },
+    });
+
+    if (error) {
+      const details = await formatFunctionInvokeError(error, response);
+      console.error("Failed to refresh room membership:", details);
     }
   };
 
@@ -152,9 +233,11 @@ export default function Home() {
       const storedClientId = window.localStorage.getItem("chatroom-client-id");
       if (storedClientId) {
         clientIdRef.current = storedClientId;
+        setClientId(storedClientId);
       } else {
         const nextId = randomId();
         clientIdRef.current = nextId;
+        setClientId(nextId);
         window.localStorage.setItem("chatroom-client-id", nextId);
       }
 
@@ -177,6 +260,24 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    if (!supabase || !clientId) return;
+
+    let cancelled = false;
+    const run = async () => {
+      await assignRoom(clientId);
+      if (!cancelled) {
+        void touchRoomMember();
+      }
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [clientId]);
+
+  useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setMessages([
       {
@@ -194,11 +295,31 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    if (!room || !clientId) return;
+    roomRef.current = room;
+
+    void touchRoomMember();
+    const interval = window.setInterval(() => {
+      void touchRoomMember();
+    }, 20_000);
+
+    return () => window.clearInterval(interval);
+  }, [room, clientId]);
+
+  useEffect(() => {
+    if (!room) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setMutedUsers({});
+    setCooldownUntil(null);
+  }, [room]);
+
+  useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages.length]);
 
   const canSend = Boolean(
     name &&
+      room &&
       supabase &&
       isSubscribed &&
       isJoined &&
@@ -206,12 +327,12 @@ export default function Home() {
   );
 
   useEffect(() => {
-    if (!supabase) return;
+    if (!supabase || !room || !clientId) return;
 
-    const channel = supabase.channel(ROOM_CHANNEL, {
+    const channel = supabase.channel(`room:${room}`, {
       config: {
         broadcast: { self: true },
-        presence: { key: clientIdRef.current || randomId() },
+        presence: { key: clientId },
       },
     });
 
@@ -225,7 +346,7 @@ export default function Home() {
     channel.on("broadcast", { event: "mute" }, ({ payload }) => {
       const data = payload as MutePayload;
       if (!data?.name || !data?.mutedUntil) return;
-      if (data.room && data.room !== ROOM_NAME) return;
+      if (data.room && data.room !== room) return;
       setMutedUsers((prev) => ({ ...prev, [data.name]: data.mutedUntil }));
       if (data.name === nameRef.current && Date.now() < data.mutedUntil) {
         setCooldownUntil(data.mutedUntil);
@@ -270,7 +391,7 @@ export default function Home() {
       setIsSubscribed(false);
       setIsJoined(false);
     };
-  }, []);
+  }, [room, clientId]);
 
   useEffect(() => {
     nameRef.current = name;
@@ -323,7 +444,7 @@ export default function Home() {
     sendTimestampsRef.current.push(currentTime);
     if (sendTimestampsRef.current.length > maxMessages) {
       const mutedUntil = currentTime + 60_000;
-      const mutePayload: MutePayload = { name, mutedUntil, room: ROOM_NAME };
+      const mutePayload: MutePayload = { name, mutedUntil, room: room ?? DEFAULT_ROOM };
       setCooldownUntil(mutedUntil);
       setMutedUsers((prev) => ({ ...prev, [name]: mutedUntil }));
       void persistMute(mutePayload);
@@ -371,7 +492,7 @@ export default function Home() {
             <div className="mb-6 flex items-center justify-between">
               <div>
                 <h2 className="text-xl font-medium">Conversation</h2>
-                <p className="text-sm text-slate-400">Room: Pine Grove</p>
+                <p className="text-sm text-slate-400">Room: {roomLabelFromSlug(room)}</p>
               </div>
               <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-200">
                 {connected.length} online
@@ -396,6 +517,9 @@ export default function Home() {
                 <p className="mb-3 text-sm text-amber-200">
                   You need a display name before you can send messages.
                 </p>
+              )}
+              {!room && (
+                <p className="mb-3 text-sm text-amber-200">Assigning you to a room…</p>
               )}
               {name && !isSubscribed && (
                 <p className="mb-3 text-sm text-amber-200">Connecting to chat…</p>

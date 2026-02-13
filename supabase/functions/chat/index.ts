@@ -6,9 +6,18 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
+const DEFAULT_ROOM = "pine-grove";
+const MEMBER_STALE_MS = 45_000;
+const DEFAULT_ROOM_CAPACITY = 5;
+const MAX_ROOM_CAPACITY = 25;
+const MAX_CLIENT_ID_LENGTH = 120;
+
 type RequestBody = {
-  action?: "list_mutes" | "mute";
+  action?: "list_mutes" | "mute" | "assign_room" | "touch_member";
   room?: string;
+  preferredRoom?: string;
+  clientId?: string;
+  roomCapacity?: number;
   name?: string;
   mutedUntil?: number;
 };
@@ -24,6 +33,11 @@ type DbError = {
   code?: string;
   details?: string | null;
   hint?: string | null;
+};
+
+type MemberRow = {
+  room: string;
+  last_seen?: string;
 };
 
 function jsonResponse(payload: unknown, status = 200): Response {
@@ -45,7 +59,7 @@ function dbErrorResponse(error: DbError): Response {
     return jsonResponse(
       {
         error:
-          "Database table public.chat_mutes is missing. Run the migration (supabase db push) and retry.",
+          "Database table is missing. Run migrations with `supabase db push` and retry.",
         code: error.code,
       },
       500,
@@ -61,6 +75,40 @@ function dbErrorResponse(error: DbError): Response {
     },
     500,
   );
+}
+
+function normalizeRoom(rawRoom?: string | null): string {
+  const trimmed = rawRoom?.trim().toLowerCase() ?? "";
+  if (!trimmed) return DEFAULT_ROOM;
+
+  const normalized = trimmed
+    .replace(/[^a-z0-9-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  if (!normalized) return DEFAULT_ROOM;
+  return normalized.slice(0, 64);
+}
+
+function normalizeClientId(rawClientId?: string | null): string | null {
+  const trimmed = rawClientId?.trim() ?? "";
+  if (!trimmed) return null;
+  return trimmed.slice(0, MAX_CLIENT_ID_LENGTH);
+}
+
+function roomFromIndex(index: number): string {
+  if (index <= 1) return DEFAULT_ROOM;
+  return `${DEFAULT_ROOM}-${index}`;
+}
+
+function pickAvailableRoom(counts: Record<string, number>, roomCapacity: number): string {
+  for (let index = 1; index <= 200; index += 1) {
+    const room = roomFromIndex(index);
+    if ((counts[room] ?? 0) < roomCapacity) {
+      return room;
+    }
+  }
+  return roomFromIndex(201);
 }
 
 Deno.serve(async (req) => {
@@ -91,17 +139,31 @@ Deno.serve(async (req) => {
   }
 
   const action = body.action ?? "list_mutes";
-  const room = body.room?.trim() || "pine-grove";
+  const room = normalizeRoom(body.room);
   const nowIso = new Date().toISOString();
+  const staleMemberCutoffIso = new Date(Date.now() - MEMBER_STALE_MS).toISOString();
 
-  const { error: cleanupError } = await supabase
-    .from("chat_mutes")
-    .delete()
-    .eq("room", room)
-    .lte("muted_until", nowIso);
+  if (action === "list_mutes" || action === "mute") {
+    const { error: cleanupError } = await supabase
+      .from("chat_mutes")
+      .delete()
+      .eq("room", room)
+      .lte("muted_until", nowIso);
 
-  if (cleanupError) {
-    return dbErrorResponse(cleanupError as DbError);
+    if (cleanupError) {
+      return dbErrorResponse(cleanupError as DbError);
+    }
+  }
+
+  if (action === "assign_room" || action === "touch_member") {
+    const { error: cleanupMembersError } = await supabase
+      .from("chat_room_members")
+      .delete()
+      .lte("last_seen", staleMemberCutoffIso);
+
+    if (cleanupMembersError) {
+      return dbErrorResponse(cleanupMembersError as DbError);
+    }
   }
 
   if (action === "list_mutes") {
@@ -123,6 +185,116 @@ Deno.serve(async (req) => {
     }));
 
     return jsonResponse({ mutes });
+  }
+
+  if (action === "assign_room") {
+    const clientId = normalizeClientId(body.clientId);
+    if (!clientId) {
+      return badRequest("clientId is required.");
+    }
+
+    const hasPreferredRoom = Boolean(body.preferredRoom?.trim());
+    const preferredRoom = hasPreferredRoom ? normalizeRoom(body.preferredRoom) : null;
+    const roomCapacity =
+      typeof body.roomCapacity === "number" && Number.isInteger(body.roomCapacity) && body.roomCapacity > 0
+        ? Math.min(body.roomCapacity, MAX_ROOM_CAPACITY)
+        : DEFAULT_ROOM_CAPACITY;
+
+    let assignedRoom: string;
+    let assignment: "preferred" | "existing" | "auto";
+
+    if (preferredRoom) {
+      assignedRoom = preferredRoom;
+      assignment = "preferred";
+    } else {
+      const { data: existingMember, error: existingMemberError } = await supabase
+        .from("chat_room_members")
+        .select("room,last_seen")
+        .eq("client_id", clientId)
+        .maybeSingle();
+
+      if (existingMemberError) {
+        return dbErrorResponse(existingMemberError as DbError);
+      }
+
+      const existing = existingMember as MemberRow | null;
+      const existingLastSeen = existing?.last_seen ? new Date(existing.last_seen).getTime() : 0;
+      if (existing?.room && existingLastSeen > Date.now() - MEMBER_STALE_MS) {
+        assignedRoom = normalizeRoom(existing.room);
+        assignment = "existing";
+      } else {
+        const { data: activeMembers, error: activeMembersError } = await supabase
+          .from("chat_room_members")
+          .select("room")
+          .gt("last_seen", staleMemberCutoffIso);
+
+        if (activeMembersError) {
+          return dbErrorResponse(activeMembersError as DbError);
+        }
+
+        const countsByRoom: Record<string, number> = {};
+        (activeMembers ?? []).forEach((member) => {
+          const roomName = normalizeRoom((member as MemberRow).room);
+          countsByRoom[roomName] = (countsByRoom[roomName] ?? 0) + 1;
+        });
+
+        assignedRoom = pickAvailableRoom(countsByRoom, roomCapacity);
+        assignment = "auto";
+      }
+    }
+
+    const { error: upsertMemberError } = await supabase.from("chat_room_members").upsert(
+      {
+        client_id: clientId,
+        room: assignedRoom,
+        last_seen: nowIso,
+      },
+      { onConflict: "client_id" },
+    );
+
+    if (upsertMemberError) {
+      return dbErrorResponse(upsertMemberError as DbError);
+    }
+
+    const { count: activeCount, error: activeCountError } = await supabase
+      .from("chat_room_members")
+      .select("client_id", { count: "exact", head: true })
+      .eq("room", assignedRoom)
+      .gt("last_seen", staleMemberCutoffIso);
+
+    if (activeCountError) {
+      return dbErrorResponse(activeCountError as DbError);
+    }
+
+    return jsonResponse({
+      room: assignedRoom,
+      assignment,
+      occupancy: activeCount ?? 1,
+      capacity: roomCapacity,
+    });
+  }
+
+  if (action === "touch_member") {
+    const clientId = normalizeClientId(body.clientId);
+    if (!clientId) {
+      return badRequest("clientId is required.");
+    }
+    const memberRoom = normalizeRoom(body.room);
+
+    const { error: touchError } = await supabase.from("chat_room_members").upsert(
+      {
+        client_id: clientId,
+        room: memberRoom,
+        last_seen: nowIso,
+      },
+      { onConflict: "client_id" },
+    );
+
+    if (touchError) {
+      return dbErrorResponse(touchError as DbError);
+    }
+
+    return jsonResponse({ ok: true, room: memberRoom });
   }
 
   if (action === "mute") {
