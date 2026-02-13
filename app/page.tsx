@@ -629,6 +629,10 @@ export default function Home() {
                   className="w-full rounded-full border border-slate-700 bg-slate-950/60 px-4 py-3 text-base text-slate-100 placeholder:text-slate-500 focus:border-emerald-400 focus:outline-none"
                   placeholder={name ? "Type a message" : "Set a name to chat"}
                   value={draftMessage}
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
                   onChange={(event) => setDraftMessage(event.target.value)}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") {
