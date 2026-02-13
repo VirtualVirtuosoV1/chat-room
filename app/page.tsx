@@ -9,9 +9,11 @@ const bodyFont = Spectral({ subsets: ["latin"], weight: ["400", "500", "600"] })
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
 const supabaseKey =
-  process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? "";
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ?? "";
 
 const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
+const ROOM_NAME = "pine-grove";
+const ROOM_CHANNEL = `room:${ROOM_NAME}`;
 
 type Message = {
   id: string;
@@ -23,6 +25,11 @@ type Message = {
 type MutePayload = {
   name: string;
   mutedUntil: number;
+  room?: string;
+};
+
+type ActiveMutesResponse = {
+  mutes?: MutePayload[];
 };
 
 function timestamp() {
@@ -34,6 +41,35 @@ function randomId() {
     return crypto.randomUUID();
   }
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+async function formatFunctionInvokeError(error: unknown, response?: Response): Promise<string> {
+  const baseMessage = error instanceof Error ? error.message : String(error);
+  if (!response) {
+    return baseMessage;
+  }
+
+  const status = `${response.status}${response.statusText ? ` ${response.statusText}` : ""}`;
+
+  try {
+    const rawBody = await response.clone().text();
+    if (!rawBody) {
+      return `${baseMessage} (HTTP ${status})`;
+    }
+
+    try {
+      const parsed = JSON.parse(rawBody) as { error?: string };
+      if (parsed?.error) {
+        return `${baseMessage} (HTTP ${status}): ${parsed.error}`;
+      }
+    } catch {
+      // Fallback to raw text body.
+    }
+
+    return `${baseMessage} (HTTP ${status}): ${rawBody}`;
+  } catch {
+    return `${baseMessage} (HTTP ${status})`;
+  }
 }
 
 export default function Home() {
@@ -54,9 +90,59 @@ export default function Home() {
   const sendTimestampsRef = useRef<number[]>([]);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
+  const loadMutedUsers = async () => {
+    if (!supabase) return;
+
+    const { data, error, response } = await supabase.functions.invoke<ActiveMutesResponse>("chat", {
+      body: {
+        action: "list_mutes",
+        room: ROOM_NAME,
+      },
+    });
+
+    if (error) {
+      const details = await formatFunctionInvokeError(error, response);
+      console.error("Failed to load muted users:", details);
+      return;
+    }
+
+    const currentTime = Date.now();
+    const activeMutes: Record<string, number> = {};
+    (data?.mutes ?? []).forEach((entry) => {
+      if (!entry?.name || !entry?.mutedUntil || currentTime >= entry.mutedUntil) return;
+      activeMutes[entry.name] = entry.mutedUntil;
+    });
+
+    setMutedUsers((prev) => ({ ...prev, ...activeMutes }));
+
+    const selfMuteUntil = nameRef.current ? activeMutes[nameRef.current] : undefined;
+    if (selfMuteUntil && currentTime < selfMuteUntil) {
+      setCooldownUntil(selfMuteUntil);
+    }
+  };
+
+  const persistMute = async (payload: MutePayload) => {
+    if (!supabase) return;
+
+    const { error, response } = await supabase.functions.invoke("chat", {
+      body: {
+        action: "mute",
+        room: payload.room ?? ROOM_NAME,
+        name: payload.name,
+        mutedUntil: payload.mutedUntil,
+      },
+    });
+
+    if (error) {
+      const details = await formatFunctionInvokeError(error, response);
+      console.error("Failed to persist mute:", details);
+    }
+  };
+
   useEffect(() => {
     const storedName = typeof window !== "undefined" ? window.localStorage.getItem("chatroom-name") : null;
     if (storedName) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setName(storedName);
       setDraftName(storedName);
       setShowNamePrompt(false);
@@ -91,6 +177,7 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setMessages([
       {
         id: "welcome",
@@ -121,7 +208,7 @@ export default function Home() {
   useEffect(() => {
     if (!supabase) return;
 
-    const channel = supabase.channel("room:pine-grove", {
+    const channel = supabase.channel(ROOM_CHANNEL, {
       config: {
         broadcast: { self: true },
         presence: { key: clientIdRef.current || randomId() },
@@ -138,7 +225,11 @@ export default function Home() {
     channel.on("broadcast", { event: "mute" }, ({ payload }) => {
       const data = payload as MutePayload;
       if (!data?.name || !data?.mutedUntil) return;
+      if (data.room && data.room !== ROOM_NAME) return;
       setMutedUsers((prev) => ({ ...prev, [data.name]: data.mutedUntil }));
+      if (data.name === nameRef.current && Date.now() < data.mutedUntil) {
+        setCooldownUntil(data.mutedUntil);
+      }
     });
 
     channel.on("presence", { event: "sync" }, () => {
@@ -161,6 +252,7 @@ export default function Home() {
     channel.subscribe((status) => {
       if (status === "SUBSCRIBED") {
         setIsSubscribed(true);
+        void loadMutedUsers();
         if (nameRef.current) {
           channel.track({ name: nameRef.current });
         }
@@ -183,6 +275,7 @@ export default function Home() {
   useEffect(() => {
     nameRef.current = name;
     if (!name) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setIsJoined(false);
       return;
     }
@@ -230,12 +323,14 @@ export default function Home() {
     sendTimestampsRef.current.push(currentTime);
     if (sendTimestampsRef.current.length > maxMessages) {
       const mutedUntil = currentTime + 60_000;
+      const mutePayload: MutePayload = { name, mutedUntil, room: ROOM_NAME };
       setCooldownUntil(mutedUntil);
       setMutedUsers((prev) => ({ ...prev, [name]: mutedUntil }));
+      void persistMute(mutePayload);
       channelRef.current?.send({
         type: "broadcast",
         event: "mute",
-        payload: { name, mutedUntil },
+        payload: mutePayload,
       });
       broadcastSystemMessage(`${name} was muted for 1 minute due to spam.`);
       return;
