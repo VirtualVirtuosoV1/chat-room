@@ -108,6 +108,7 @@ export default function Home() {
   const clientIdRef = useRef<string>("");
   const nameRef = useRef<string>("");
   const roomRef = useRef<string | null>(null);
+  const copyResetTimerRef = useRef<number | null>(null);
   const [name, setName] = useState<string>("");
   const [draftName, setDraftName] = useState<string>("");
   const [draftMessage, setDraftMessage] = useState<string>("");
@@ -120,6 +121,7 @@ export default function Home() {
   const [isJoined, setIsJoined] = useState<boolean>(false);
   const [mutedUsers, setMutedUsers] = useState<Record<string, number>>({});
   const [cooldownUntil, setCooldownUntil] = useState<number | null>(null);
+  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "error">("idle");
   const [now, setNow] = useState<number>(() => Date.now());
   const sendTimestampsRef = useRef<number[]>([]);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -220,6 +222,47 @@ export default function Home() {
     }
   };
 
+  const setCopyStatusForMoment = (status: "copied" | "error") => {
+    setCopyStatus(status);
+    if (copyResetTimerRef.current) {
+      window.clearTimeout(copyResetTimerRef.current);
+    }
+    copyResetTimerRef.current = window.setTimeout(() => {
+      setCopyStatus("idle");
+      copyResetTimerRef.current = null;
+    }, 2_200);
+  };
+
+  const handleCopyRoomLink = async () => {
+    if (!room || typeof window === "undefined") return;
+    const shareUrl = new URL(window.location.href);
+    shareUrl.searchParams.set("room", room);
+    const link = shareUrl.toString();
+
+    try {
+      await navigator.clipboard.writeText(link);
+      setCopyStatusForMoment("copied");
+      return;
+    } catch {
+      // Fall back to a hidden textarea for browsers that block Clipboard API.
+    }
+
+    try {
+      const fallbackInput = document.createElement("textarea");
+      fallbackInput.value = link;
+      fallbackInput.setAttribute("readonly", "true");
+      fallbackInput.style.position = "absolute";
+      fallbackInput.style.left = "-9999px";
+      document.body.appendChild(fallbackInput);
+      fallbackInput.select();
+      const copied = document.execCommand("copy");
+      document.body.removeChild(fallbackInput);
+      setCopyStatusForMoment(copied ? "copied" : "error");
+    } catch {
+      setCopyStatusForMoment("error");
+    }
+  };
+
   useEffect(() => {
     const storedName = typeof window !== "undefined" ? window.localStorage.getItem("chatroom-name") : null;
     if (storedName) {
@@ -257,6 +300,14 @@ export default function Home() {
       window.addEventListener("storage", handleStorage);
       return () => window.removeEventListener("storage", handleStorage);
     }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (copyResetTimerRef.current) {
+        window.clearTimeout(copyResetTimerRef.current);
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -492,7 +543,18 @@ export default function Home() {
             <div className="mb-6 flex items-center justify-between">
               <div>
                 <h2 className="text-xl font-medium">Conversation</h2>
-                <p className="text-sm text-slate-400">Room: {roomLabelFromSlug(room)}</p>
+                <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
+                  <span className="text-slate-400">Room: {roomLabelFromSlug(room)}</span>
+                  <button
+                    className="rounded-full border border-slate-700 bg-slate-900/70 px-3 py-1 text-xs font-medium text-slate-200 transition hover:border-emerald-400 hover:text-emerald-200 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
+                    onClick={handleCopyRoomLink}
+                    disabled={!room}
+                  >
+                    Copy link
+                  </button>
+                  {copyStatus === "copied" && <span className="text-xs text-emerald-300">Copied</span>}
+                  {copyStatus === "error" && <span className="text-xs text-rose-300">Copy failed</span>}
+                </div>
               </div>
               <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-200">
                 {connected.length} online
@@ -609,6 +671,8 @@ export default function Home() {
                   <li>Pick a display name to join.</li>
                   <li>Messages are broadcast in real time.</li>
                   <li>Be kind, clear, and concise.</li>
+                  <li>Spamming messages may result in a temporary mute.</li>
+                  <li>There is a soft limit of 5 users per room. You can bypass this limit by joining with a room&apos;s link.</li>
                 </ul>
               </div>
             </div>
