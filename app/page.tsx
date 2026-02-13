@@ -128,6 +128,8 @@ export default function Home() {
   const [isJoined, setIsJoined] = useState<boolean>(false);
   const [mutedUsers, setMutedUsers] = useState<Record<string, number>>({});
   const [cooldownUntil, setCooldownUntil] = useState<number | null>(null);
+  const [isRenameMode, setIsRenameMode] = useState<boolean>(false);
+  const [renameDraft, setRenameDraft] = useState<string>("");
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "error">("idle");
   const [now, setNow] = useState<number>(() => Date.now());
   const sendTimestampsRef = useRef<number[]>([]);
@@ -271,14 +273,21 @@ export default function Home() {
   };
 
   const handleChangeName = () => {
-    if (typeof window === "undefined") return;
     const currentName = nameRef.current.trim();
     if (!currentName) return;
+    setRenameDraft("");
+    setIsRenameMode(true);
+  };
 
-    const nextRawName = window.prompt("Enter your new display name", currentName);
-    if (nextRawName === null) return;
+  const closeRenameMode = () => {
+    setIsRenameMode(false);
+    setRenameDraft("");
+  };
 
-    const nextName = nextRawName.trim();
+  const handleSaveNameChange = () => {
+    if (typeof window === "undefined") return;
+    const currentName = nameRef.current.trim();
+    const nextName = renameDraft.trim();
     if (!nextName || nextName === currentName) {
       return;
     }
@@ -288,6 +297,7 @@ export default function Home() {
     window.localStorage.setItem("chatroom-name", nextName);
     channelRef.current?.track({ name: nextName });
     broadcastSystemMessage(`${currentName} changed their name to ${nextName}`);
+    closeRenameMode();
   };
 
   useEffect(() => {
@@ -745,6 +755,40 @@ export default function Home() {
           </aside>
         </section>
       </div>
+
+      {isRenameMode && (
+        <div
+          className="fixed inset-0 z-30 flex items-end justify-center bg-black/75 px-4 pb-8 sm:items-center sm:pb-0"
+          onClick={closeRenameMode}
+        >
+          <div
+            className="w-full max-w-2xl rounded-3xl border border-slate-800 bg-slate-950/95 p-4 shadow-2xl shadow-black/40"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex flex-col gap-3 sm:flex-row">
+              <input
+                className="w-full rounded-full border border-slate-700 bg-slate-950/80 px-4 py-3 text-base text-slate-100 placeholder:text-slate-500 focus:border-emerald-400 focus:outline-none"
+                placeholder={name}
+                value={renameDraft}
+                onChange={(event) => setRenameDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    handleSaveNameChange();
+                  }
+                }}
+                autoFocus
+              />
+              <button
+                className="rounded-full bg-emerald-400 px-6 py-3 text-sm font-semibold text-slate-900 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+                onClick={handleSaveNameChange}
+                disabled={!renameDraft.trim() || renameDraft.trim() === name.trim()}
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showNamePrompt && (
         <div className="fixed inset-0 z-20 flex items-center justify-center bg-slate-950/80 px-6">
