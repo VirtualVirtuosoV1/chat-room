@@ -270,6 +270,26 @@ export default function Home() {
     }
   };
 
+  const handleChangeName = () => {
+    if (typeof window === "undefined") return;
+    const currentName = nameRef.current.trim();
+    if (!currentName) return;
+
+    const nextRawName = window.prompt("Enter your new display name", currentName);
+    if (nextRawName === null) return;
+
+    const nextName = nextRawName.trim();
+    if (!nextName || nextName === currentName) {
+      return;
+    }
+
+    setName(nextName);
+    setDraftName(nextName);
+    window.localStorage.setItem("chatroom-name", nextName);
+    channelRef.current?.track({ name: nextName });
+    broadcastSystemMessage(`${currentName} changed their name to ${nextName}`);
+  };
+
   useEffect(() => {
     const storedName = typeof window !== "undefined" ? window.localStorage.getItem("chatroom-name") : null;
     if (storedName) {
@@ -579,6 +599,13 @@ export default function Home() {
                     disabled={!room}
                   >
                     Copy link
+                  </button>
+                  <button
+                    className="rounded-full border border-slate-700 bg-slate-900/70 px-3 py-1 text-xs font-medium text-slate-200 transition hover:border-emerald-400 hover:text-emerald-200 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
+                    onClick={handleChangeName}
+                    disabled={!name}
+                  >
+                    Change name
                   </button>
                   {copyStatus === "copied" && <span className="text-xs text-emerald-300">Copied</span>}
                   {copyStatus === "error" && <span className="text-xs text-rose-300">Copy failed</span>}
