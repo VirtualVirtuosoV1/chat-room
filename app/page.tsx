@@ -20,6 +20,11 @@ type Message = {
   timestamp: string;
 };
 
+type MutePayload = {
+  name: string;
+  mutedUntil: number;
+};
+
 function timestamp() {
   return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
@@ -41,6 +46,13 @@ export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [showNamePrompt, setShowNamePrompt] = useState<boolean>(true);
   const [connected, setConnected] = useState<string[]>([]);
+  const [isSubscribed, setIsSubscribed] = useState<boolean>(false);
+  const [isJoined, setIsJoined] = useState<boolean>(false);
+  const [mutedUsers, setMutedUsers] = useState<Record<string, number>>({});
+  const [cooldownUntil, setCooldownUntil] = useState<number | null>(null);
+  const [now, setNow] = useState<number>(() => Date.now());
+  const sendTimestampsRef = useRef<number[]>([]);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const storedName = typeof window !== "undefined" ? window.localStorage.getItem("chatroom-name") : null;
@@ -59,6 +71,22 @@ export default function Home() {
         clientIdRef.current = nextId;
         window.localStorage.setItem("chatroom-client-id", nextId);
       }
+
+      const handleStorage = (event: StorageEvent) => {
+        if (event.key !== "chatroom-name") return;
+        if (event.newValue) {
+          setName(event.newValue);
+          setDraftName(event.newValue);
+          setShowNamePrompt(false);
+        } else {
+          setName("");
+          setDraftName("");
+          setShowNamePrompt(true);
+        }
+      };
+
+      window.addEventListener("storage", handleStorage);
+      return () => window.removeEventListener("storage", handleStorage);
     }
   }, []);
 
@@ -72,6 +100,23 @@ export default function Home() {
       },
     ]);
   }, []);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [messages.length]);
+
+  const canSend = Boolean(
+    name &&
+      supabase &&
+      isSubscribed &&
+      isJoined &&
+      !(cooldownUntil !== null && now < cooldownUntil)
+  );
 
   useEffect(() => {
     if (!supabase) return;
@@ -90,6 +135,12 @@ export default function Home() {
       setMessages((prev) => [...prev, message]);
     });
 
+    channel.on("broadcast", { event: "mute" }, ({ payload }) => {
+      const data = payload as MutePayload;
+      if (!data?.name || !data?.mutedUntil) return;
+      setMutedUsers((prev) => ({ ...prev, [data.name]: data.mutedUntil }));
+    });
+
     channel.on("presence", { event: "sync" }, () => {
       const state = channel.presenceState() as Record<string, { name?: string }[]>;
       const names = new Set<string>();
@@ -102,26 +153,43 @@ export default function Home() {
         });
       });
 
-      setConnected(Array.from(names));
+      const list = Array.from(names);
+      setConnected(list);
+      setIsJoined(nameRef.current ? list.includes(nameRef.current) : false);
     });
 
     channel.subscribe((status) => {
-      if (status === "SUBSCRIBED" && nameRef.current) {
-        channel.track({ name: nameRef.current });
+      if (status === "SUBSCRIBED") {
+        setIsSubscribed(true);
+        if (nameRef.current) {
+          channel.track({ name: nameRef.current });
+        }
+        return;
+      }
+      if (status === "CLOSED" || status === "TIMED_OUT" || status === "CHANNEL_ERROR") {
+        setIsSubscribed(false);
+        setIsJoined(false);
       }
     });
 
     return () => {
       supabase.removeChannel(channel);
       channelRef.current = null;
+      setIsSubscribed(false);
+      setIsJoined(false);
     };
   }, []);
 
   useEffect(() => {
     nameRef.current = name;
-    if (!name) return;
-    channelRef.current?.track({ name });
-  }, [name]);
+    if (!name) {
+      setIsJoined(false);
+      return;
+    }
+    if (isSubscribed) {
+      channelRef.current?.track({ name });
+    }
+  }, [name, isSubscribed]);
 
   const broadcastSystemMessage = (content: string) => {
     if (!channelRef.current) return;
@@ -151,7 +219,25 @@ export default function Home() {
 
   const handleSend = () => {
     const trimmedMessage = draftMessage.trim();
-    if (!trimmedMessage || !name) {
+    if (!trimmedMessage || !canSend) {
+      return;
+    }
+    const currentTime = Date.now();
+
+    const windowMs = 10_000;
+    const maxMessages = 6;
+    sendTimestampsRef.current = sendTimestampsRef.current.filter((stamp) => currentTime - stamp < windowMs);
+    sendTimestampsRef.current.push(currentTime);
+    if (sendTimestampsRef.current.length > maxMessages) {
+      const mutedUntil = currentTime + 60_000;
+      setCooldownUntil(mutedUntil);
+      setMutedUsers((prev) => ({ ...prev, [name]: mutedUntil }));
+      channelRef.current?.send({
+        type: "broadcast",
+        event: "mute",
+        payload: { name, mutedUntil },
+      });
+      broadcastSystemMessage(`${name} was muted for 1 minute due to spam.`);
       return;
     }
     channelRef.current?.send({
@@ -168,11 +254,11 @@ export default function Home() {
   };
 
   return (
-    <div className={`${displayFont.className} min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-800 text-slate-100`}>
-      <div className="mx-auto flex min-h-screen max-w-6xl flex-col px-6 py-10">
-        <header className="mb-8 flex flex-col gap-3">
+    <div className={`${displayFont.className} h-screen overflow-hidden bg-gradient-to-br from-slate-950 via-slate-900 to-slate-800 text-slate-100`}>
+      <div className="mx-auto flex h-full max-w-6xl flex-col px-6 py-10">
+        <header className="mb-6 flex flex-col gap-3">
           <p className="text-sm uppercase tracking-[0.3em] text-slate-400">Live room</p>
-          <h1 className="text-4xl font-semibold">Studio Chatroom</h1>
+          <h1 className="text-4xl font-semibold">Chatroom</h1>
           <p className={`${bodyFont.className} max-w-2xl text-lg text-slate-300`}>
             A lightweight space to exchange notes in real time. Pick a name to join the conversation.
           </p>
@@ -185,8 +271,8 @@ export default function Home() {
           </div>
         )}
 
-        <section className="grid flex-1 gap-6 lg:grid-cols-[minmax(0,1fr)_280px]">
-          <div className="flex h-full flex-col rounded-3xl border border-slate-800 bg-slate-950/70 p-6 shadow-2xl shadow-slate-950/40">
+        <section className="grid min-h-0 flex-1 gap-6 overflow-hidden lg:grid-cols-[minmax(0,1fr)_280px]">
+          <div className="flex min-h-0 flex-col overflow-hidden rounded-3xl border border-slate-800 bg-slate-950/70 p-6 shadow-2xl shadow-slate-950/40">
             <div className="mb-6 flex items-center justify-between">
               <div>
                 <h2 className="text-xl font-medium">Conversation</h2>
@@ -197,7 +283,7 @@ export default function Home() {
               </span>
             </div>
 
-            <div className="flex-1 space-y-4 overflow-y-auto pr-2">
+            <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-2">
               {messages.map((message) => (
                 <div key={message.id} className="rounded-2xl bg-slate-900/60 p-4">
                   <div className="flex items-center justify-between text-xs text-slate-400">
@@ -207,12 +293,26 @@ export default function Home() {
                   <p className={`${bodyFont.className} mt-2 text-sm text-slate-200`}>{message.content}</p>
                 </div>
               ))}
+              <div ref={messagesEndRef} />
             </div>
 
             <div className="mt-6 rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
               {!name && (
                 <p className="mb-3 text-sm text-amber-200">
                   You need a display name before you can send messages.
+                </p>
+              )}
+              {name && !isSubscribed && (
+                <p className="mb-3 text-sm text-amber-200">Connecting to chat…</p>
+              )}
+              {name && isSubscribed && !isJoined && (
+                <p className="mb-3 text-sm text-amber-200">
+                  Rejoining the room… If this persists, refresh the page.
+                </p>
+              )}
+              {cooldownUntil && now < cooldownUntil && (
+                <p className="mb-3 text-sm text-rose-200">
+                  You are muted for {Math.ceil((cooldownUntil - now) / 1000)} seconds.
                 </p>
               )}
               <div className="flex flex-col gap-3 sm:flex-row">
@@ -226,12 +326,12 @@ export default function Home() {
                       handleSend();
                     }
                   }}
-                  disabled={!name || !supabase}
+                  disabled={!canSend}
                 />
                 <button
                   className="rounded-full bg-emerald-400 px-6 py-3 text-sm font-semibold text-slate-900 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
                   onClick={handleSend}
-                  disabled={!name || !draftMessage.trim() || !supabase}
+                  disabled={!draftMessage.trim() || !canSend}
                 >
                   Send
                 </button>
@@ -239,12 +339,9 @@ export default function Home() {
             </div>
           </div>
 
-          <aside className="flex flex-col gap-6">
+          <aside className="flex min-h-0 flex-col gap-6 overflow-hidden">
             <div className="rounded-3xl border border-slate-800 bg-slate-950/70 p-6">
               <h3 className="text-lg font-semibold">Who&apos;s here</h3>
-              <p className={`${bodyFont.className} mt-2 text-sm text-slate-400`}>
-                Names currently connected to the room.
-              </p>
               <ul className="mt-4 space-y-3 text-sm">
                 {connected.map((person) => (
                   <li key={person} className="flex items-center justify-between rounded-full bg-slate-900/70 px-4 py-2">
@@ -262,13 +359,39 @@ export default function Home() {
                 )}
               </ul>
             </div>
-            <div className="rounded-3xl border border-slate-800 bg-gradient-to-br from-slate-900 via-slate-900/70 to-slate-950 p-6">
-              <h3 className="text-lg font-semibold">Room rules</h3>
-              <ul className={`${bodyFont.className} mt-3 space-y-2 text-sm text-slate-300`}>
-                <li>Pick a display name to join.</li>
-                <li>Messages are broadcast in real time.</li>
-                <li>Be kind, clear, and concise.</li>
-              </ul>
+            <div className="min-h-0 flex-1 space-y-6 overflow-y-auto pr-1">
+              <div className="rounded-3xl border border-slate-800 bg-slate-950/70 p-6">
+                <h3 className="text-lg font-semibold">Muted</h3>
+                <p className={`${bodyFont.className} mt-2 text-sm text-slate-400`}>
+                  Users currently rate-limited for spam.
+                </p>
+                <ul className="mt-4 space-y-3 text-sm">
+                  {Object.entries(mutedUsers)
+                    .filter(([, until]) => now < until)
+                    .sort((a, b) => a[1] - b[1])
+                    .map(([person, until]) => (
+                      <li key={person} className="flex items-center justify-between rounded-full bg-slate-900/70 px-4 py-2">
+                        <span>{person}</span>
+                        <span className="text-rose-300">
+                          {Math.ceil((until - now) / 1000)}s
+                        </span>
+                      </li>
+                    ))}
+                  {Object.values(mutedUsers).filter((until) => now < until).length === 0 && (
+                    <li className="rounded-2xl bg-slate-900/70 px-4 py-3 text-slate-400">
+                      No one is muted.
+                    </li>
+                  )}
+                </ul>
+              </div>
+              <div className="rounded-3xl border border-slate-800 bg-gradient-to-br from-slate-900 via-slate-900/70 to-slate-950 p-6">
+                <h3 className="text-lg font-semibold">Room rules</h3>
+                <ul className={`${bodyFont.className} mt-3 space-y-2 text-sm text-slate-300`}>
+                  <li>Pick a display name to join.</li>
+                  <li>Messages are broadcast in real time.</li>
+                  <li>Be kind, clear, and concise.</li>
+                </ul>
+              </div>
             </div>
           </aside>
         </section>
