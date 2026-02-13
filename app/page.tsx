@@ -625,17 +625,24 @@ export default function Home() {
                 </p>
               )}
               <div className="flex flex-col gap-3 sm:flex-row">
-                <input
-                  className="w-full rounded-full border border-slate-700 bg-slate-950/60 px-4 py-3 text-base text-slate-100 placeholder:text-slate-500 focus:border-emerald-400 focus:outline-none"
+                <textarea
+                  className="max-h-36 min-h-[48px] w-full resize-none rounded-3xl border border-slate-700 bg-slate-950/60 px-4 py-3 text-base text-slate-100 placeholder:text-slate-500 focus:border-emerald-400 focus:outline-none"
                   placeholder={name ? "Type a message" : "Set a name to chat"}
                   value={draftMessage}
                   autoComplete="off"
                   autoCorrect="off"
                   autoCapitalize="none"
                   spellCheck={false}
+                  inputMode="text"
+                  enterKeyHint="send"
+                  data-lpignore="true"
+                  data-1p-ignore="true"
+                  aria-autocomplete="none"
+                  rows={1}
                   onChange={(event) => setDraftMessage(event.target.value)}
                   onKeyDown={(event) => {
-                    if (event.key === "Enter") {
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
                       handleSend();
                     }
                   }}
