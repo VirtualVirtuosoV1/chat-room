@@ -626,7 +626,7 @@ export default function Home() {
               )}
               <div className="flex flex-col gap-3 sm:flex-row">
                 <input
-                  className="w-full rounded-full border border-slate-700 bg-slate-950/60 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-500 focus:border-emerald-400 focus:outline-none"
+                  className="w-full rounded-full border border-slate-700 bg-slate-950/60 px-4 py-3 text-base text-slate-100 placeholder:text-slate-500 focus:border-emerald-400 focus:outline-none"
                   placeholder={name ? "Type a message" : "Set a name to chat"}
                   value={draftMessage}
                   onChange={(event) => setDraftMessage(event.target.value)}
@@ -717,7 +717,7 @@ export default function Home() {
             </p>
             <div className="mt-6 flex flex-col gap-4">
               <input
-                className="w-full rounded-2xl border border-slate-700 bg-slate-900/70 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-500 focus:border-emerald-400 focus:outline-none"
+                className="w-full rounded-2xl border border-slate-700 bg-slate-900/70 px-4 py-3 text-base text-slate-100 placeholder:text-slate-500 focus:border-emerald-400 focus:outline-none"
                 placeholder="e.g. Taylor"
                 value={draftName}
                 onChange={(event) => setDraftName(event.target.value)}
