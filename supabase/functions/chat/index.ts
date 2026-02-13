@@ -11,6 +11,8 @@ const MEMBER_STALE_MS = 45_000;
 const DEFAULT_ROOM_CAPACITY = 5;
 const MAX_ROOM_CAPACITY = 25;
 const MAX_CLIENT_ID_LENGTH = 120;
+const MAX_NAME_LENGTH = 80;
+const MAX_NAME_SUFFIX_ATTEMPTS = 500;
 const ROOM_ADJECTIVES = [
   "amber",
   "autumn",
@@ -57,7 +59,7 @@ const ROOM_NOUNS = [
 ];
 
 type RequestBody = {
-  action?: "list_mutes" | "mute" | "assign_room" | "touch_member";
+  action?: "list_mutes" | "mute" | "assign_room" | "touch_member" | "claim_name";
   room?: string;
   preferredRoom?: string;
   clientId?: string;
@@ -82,6 +84,10 @@ type DbError = {
 type MemberRow = {
   room: string;
   last_seen?: string;
+};
+
+type NameClaimRow = {
+  name: string;
 };
 
 function jsonResponse(payload: unknown, status = 200): Response {
@@ -138,6 +144,25 @@ function normalizeClientId(rawClientId?: string | null): string | null {
   const trimmed = rawClientId?.trim() ?? "";
   if (!trimmed) return null;
   return trimmed.slice(0, MAX_CLIENT_ID_LENGTH);
+}
+
+function normalizeName(rawName?: string | null): string | null {
+  const trimmed = rawName?.trim() ?? "";
+  if (!trimmed) return null;
+  return trimmed.slice(0, MAX_NAME_LENGTH);
+}
+
+function nameCandidate(baseName: string, suffixIndex: number): string {
+  if (suffixIndex <= 1) return baseName;
+
+  const suffix = ` (${suffixIndex})`;
+  const remaining = MAX_NAME_LENGTH - suffix.length;
+  if (remaining <= 0) {
+    return suffix.slice(0, MAX_NAME_LENGTH);
+  }
+
+  const clippedBase = baseName.slice(0, remaining).trimEnd();
+  return `${clippedBase}${suffix}`;
 }
 
 function buildRoomNamePool(): string[] {
@@ -240,7 +265,7 @@ Deno.serve(async (req) => {
     }
   }
 
-  if (action === "assign_room" || action === "touch_member") {
+  if (action === "assign_room" || action === "touch_member" || action === "claim_name") {
     const { error: cleanupMembersError } = await supabase
       .from("chat_room_members")
       .delete()
@@ -248,6 +273,15 @@ Deno.serve(async (req) => {
 
     if (cleanupMembersError) {
       return dbErrorResponse(cleanupMembersError as DbError);
+    }
+
+    const { error: cleanupClaimsError } = await supabase
+      .from("chat_name_claims")
+      .delete()
+      .lte("last_seen", staleMemberCutoffIso);
+
+    if (cleanupClaimsError) {
+      return dbErrorResponse(cleanupClaimsError as DbError);
     }
   }
 
@@ -341,6 +375,16 @@ Deno.serve(async (req) => {
       return dbErrorResponse(upsertMemberError as DbError);
     }
 
+    const { error: clearOtherClaimsError } = await supabase
+      .from("chat_name_claims")
+      .delete()
+      .eq("client_id", clientId)
+      .neq("room", assignedRoom);
+
+    if (clearOtherClaimsError) {
+      return dbErrorResponse(clearOtherClaimsError as DbError);
+    }
+
     const { count: activeCount, error: activeCountError } = await supabase
       .from("chat_room_members")
       .select("client_id", { count: "exact", head: true })
@@ -379,16 +423,116 @@ Deno.serve(async (req) => {
       return dbErrorResponse(touchError as DbError);
     }
 
+    const { error: touchClaimError } = await supabase
+      .from("chat_name_claims")
+      .update({ last_seen: nowIso, updated_at: nowIso })
+      .eq("room", memberRoom)
+      .eq("client_id", clientId);
+
+    if (touchClaimError) {
+      return dbErrorResponse(touchClaimError as DbError);
+    }
+
+    const { error: clearOtherClaimsError } = await supabase
+      .from("chat_name_claims")
+      .delete()
+      .eq("client_id", clientId)
+      .neq("room", memberRoom);
+
+    if (clearOtherClaimsError) {
+      return dbErrorResponse(clearOtherClaimsError as DbError);
+    }
+
     return jsonResponse({ ok: true, room: memberRoom });
   }
 
-  if (action === "mute") {
-    const name = body.name?.trim();
-    if (!name) {
+  if (action === "claim_name") {
+    const clientId = normalizeClientId(body.clientId);
+    if (!clientId) {
+      return badRequest("clientId is required.");
+    }
+
+    const baseName = normalizeName(body.name);
+    if (!baseName) {
       return badRequest("name is required.");
     }
-    if (name.length > 80) {
-      return badRequest("name is too long.");
+
+    const { error: upsertMemberError } = await supabase.from("chat_room_members").upsert(
+      {
+        client_id: clientId,
+        room,
+        last_seen: nowIso,
+      },
+      { onConflict: "client_id" },
+    );
+
+    if (upsertMemberError) {
+      return dbErrorResponse(upsertMemberError as DbError);
+    }
+
+    const { error: clearOtherClaimsError } = await supabase
+      .from("chat_name_claims")
+      .delete()
+      .eq("client_id", clientId)
+      .neq("room", room);
+
+    if (clearOtherClaimsError) {
+      return dbErrorResponse(clearOtherClaimsError as DbError);
+    }
+
+    const { data: activeClaims, error: activeClaimsError } = await supabase
+      .from("chat_name_claims")
+      .select("name")
+      .eq("room", room)
+      .neq("client_id", clientId)
+      .gt("last_seen", staleMemberCutoffIso);
+
+    if (activeClaimsError) {
+      return dbErrorResponse(activeClaimsError as DbError);
+    }
+
+    const takenNames = new Set<string>(
+      ((activeClaims ?? []) as NameClaimRow[])
+        .map((claim) => claim.name)
+        .filter((claimName): claimName is string => Boolean(claimName)),
+    );
+
+    for (let suffixIndex = 1; suffixIndex <= MAX_NAME_SUFFIX_ATTEMPTS; suffixIndex += 1) {
+      const candidate = nameCandidate(baseName, suffixIndex);
+      if (takenNames.has(candidate)) {
+        continue;
+      }
+
+      const { error: claimError } = await supabase.from("chat_name_claims").upsert(
+        {
+          room,
+          client_id: clientId,
+          name: candidate,
+          last_seen: nowIso,
+          updated_at: nowIso,
+        },
+        { onConflict: "room,client_id" },
+      );
+
+      if (!claimError) {
+        return jsonResponse({ ok: true, room, name: candidate });
+      }
+
+      if (claimError.code === "23505") {
+        takenNames.add(candidate);
+        continue;
+      }
+
+      return dbErrorResponse(claimError as DbError);
+    }
+
+    return jsonResponse({ error: "Unable to allocate a unique name in this room right now." }, 409);
+  }
+
+  if (action === "mute") {
+    const name = normalizeName(body.name);
+    if (!name) {
+      return badRequest("name is required.");
     }
     if (typeof body.mutedUntil !== "number" || !Number.isFinite(body.mutedUntil)) {
       return badRequest("mutedUntil must be a valid timestamp in milliseconds.");

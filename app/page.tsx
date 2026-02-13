@@ -14,6 +14,8 @@ const supabaseKey =
 const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
 const DEFAULT_ROOM = "pine-grove";
 const ROOM_CAPACITY = 5;
+const NAME_CHANGE_COOLDOWN_MS = 60_000;
+const NAME_CHANGE_STORAGE_KEY = "chatroom-last-name-change-at";
 
 type Message = {
   id: string;
@@ -39,10 +41,14 @@ type RoomAssignmentResponse = {
   capacity?: number;
 };
 
+type ClaimNameResponse = {
+  room?: string;
+  name?: string;
+};
+
 type ConnectedUser = {
   id: string;
   name: string;
-  displayName: string;
   isSelf: boolean;
 };
 
@@ -116,6 +122,7 @@ export default function Home() {
   const nameRef = useRef<string>("");
   const roomRef = useRef<string | null>(null);
   const copyResetTimerRef = useRef<number | null>(null);
+  const autoClaimKeyRef = useRef<string>("");
   const [name, setName] = useState<string>("");
   const [draftName, setDraftName] = useState<string>("");
   const [draftMessage, setDraftMessage] = useState<string>("");
@@ -131,6 +138,9 @@ export default function Home() {
   const [isRenameMode, setIsRenameMode] = useState<boolean>(false);
   const [renameDraft, setRenameDraft] = useState<string>("");
   const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "error">("idle");
+  const [isClaimingName, setIsClaimingName] = useState<boolean>(false);
+  const [isNameClaimed, setIsNameClaimed] = useState<boolean>(false);
+  const [lastNameChangeAt, setLastNameChangeAt] = useState<number | null>(null);
   const [now, setNow] = useState<number>(() => Date.now());
   const sendTimestampsRef = useRef<number[]>([]);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -231,6 +241,33 @@ export default function Home() {
     }
   };
 
+  const claimCanonicalName = async (desiredName: string): Promise<string | null> => {
+    if (!supabase || !roomRef.current || !clientIdRef.current) return null;
+
+    const { data, error, response } = await supabase.functions.invoke<ClaimNameResponse>("chat", {
+      body: {
+        action: "claim_name",
+        room: roomRef.current,
+        clientId: clientIdRef.current,
+        name: desiredName,
+      },
+    });
+
+    if (error) {
+      const details = await formatFunctionInvokeError(error, response);
+      console.error("Failed to claim name:", details);
+      return null;
+    }
+
+    const canonical = data?.name?.trim();
+    if (!canonical) {
+      console.error("Failed to claim name: Missing canonical name in response.");
+      return null;
+    }
+
+    return canonical;
+  };
+
   const setCopyStatusForMoment = (status: "copied" | "error") => {
     setCopyStatus(status);
     if (copyResetTimerRef.current) {
@@ -274,7 +311,8 @@ export default function Home() {
 
   const handleChangeName = () => {
     const currentName = nameRef.current.trim();
-    if (!currentName) return;
+    const renameCooldownUntil = lastNameChangeAt ? lastNameChangeAt + NAME_CHANGE_COOLDOWN_MS : null;
+    if (!currentName || (renameCooldownUntil !== null && now < renameCooldownUntil)) return;
     setRenameDraft("");
     setIsRenameMode(true);
   };
@@ -284,32 +322,55 @@ export default function Home() {
     setRenameDraft("");
   };
 
-  const handleSaveNameChange = () => {
+  const handleSaveNameChange = async () => {
     if (typeof window === "undefined") return;
+    if (!roomRef.current || !clientIdRef.current) return;
     const currentName = nameRef.current.trim();
     const nextName = renameDraft.trim();
+    const renameCooldownUntil = lastNameChangeAt ? lastNameChangeAt + NAME_CHANGE_COOLDOWN_MS : null;
     if (!nextName || nextName === currentName) {
       return;
     }
+    if (renameCooldownUntil !== null && now < renameCooldownUntil) {
+      return;
+    }
 
-    setName(nextName);
-    setDraftName(nextName);
-    window.localStorage.setItem("chatroom-name", nextName);
-    channelRef.current?.track({ name: nextName });
-    broadcastSystemMessage(`${currentName} changed their name to ${nextName}`);
+    setIsClaimingName(true);
+    const canonicalName = await claimCanonicalName(nextName);
+    setIsClaimingName(false);
+    if (!canonicalName) {
+      return;
+    }
+
+    setName(canonicalName);
+    setDraftName(canonicalName);
+    setIsNameClaimed(true);
+    const changedAt = now;
+    setLastNameChangeAt(changedAt);
+    window.localStorage.setItem(NAME_CHANGE_STORAGE_KEY, String(changedAt));
+    window.localStorage.setItem("chatroom-name", canonicalName);
+    channelRef.current?.track({ name: canonicalName });
+    broadcastSystemMessage(`${currentName} changed their name to ${canonicalName}`);
     closeRenameMode();
   };
 
   useEffect(() => {
-    const storedName = typeof window !== "undefined" ? window.localStorage.getItem("chatroom-name") : null;
-    if (storedName) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setName(storedName);
-      setDraftName(storedName);
-      setShowNamePrompt(false);
-    }
-
     if (typeof window !== "undefined") {
+      const storedName = window.localStorage.getItem("chatroom-name");
+      if (storedName) {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setName(storedName);
+        setDraftName(storedName);
+        setShowNamePrompt(false);
+        setIsNameClaimed(false);
+      }
+
+      const storedLastNameChangeRaw = window.localStorage.getItem(NAME_CHANGE_STORAGE_KEY);
+      const storedLastNameChange = storedLastNameChangeRaw ? Number.parseInt(storedLastNameChangeRaw, 10) : NaN;
+      if (Number.isFinite(storedLastNameChange) && storedLastNameChange > 0) {
+        setLastNameChangeAt(storedLastNameChange);
+      }
+
       const storedClientId = window.localStorage.getItem("chatroom-client-id");
       if (storedClientId) {
         clientIdRef.current = storedClientId;
@@ -322,15 +383,28 @@ export default function Home() {
       }
 
       const handleStorage = (event: StorageEvent) => {
-        if (event.key !== "chatroom-name") return;
-        if (event.newValue) {
-          setName(event.newValue);
-          setDraftName(event.newValue);
-          setShowNamePrompt(false);
-        } else {
-          setName("");
-          setDraftName("");
-          setShowNamePrompt(true);
+        if (event.key === "chatroom-name") {
+          if (event.newValue) {
+            setName(event.newValue);
+            setDraftName(event.newValue);
+            setShowNamePrompt(false);
+            setIsNameClaimed(false);
+          } else {
+            setName("");
+            setDraftName("");
+            setShowNamePrompt(true);
+            setIsNameClaimed(false);
+          }
+          return;
+        }
+
+        if (event.key === NAME_CHANGE_STORAGE_KEY) {
+          const nextValue = event.newValue ? Number.parseInt(event.newValue, 10) : NaN;
+          if (Number.isFinite(nextValue) && nextValue > 0) {
+            setLastNameChangeAt(nextValue);
+          } else {
+            setLastNameChangeAt(null);
+          }
         }
       };
 
@@ -399,16 +473,60 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setMutedUsers({});
     setCooldownUntil(null);
+    if (nameRef.current) {
+      setIsNameClaimed(false);
+    }
   }, [room]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [messages.length]);
 
+  useEffect(() => {
+    if (!name || !room || !clientId || showNamePrompt || isNameClaimed) {
+      return;
+    }
+
+    const claimKey = `${room}|${clientId}|${name}`;
+    if (autoClaimKeyRef.current === claimKey) {
+      return;
+    }
+    autoClaimKeyRef.current = claimKey;
+
+    let cancelled = false;
+
+    const run = async () => {
+      setIsClaimingName(true);
+      const canonicalName = await claimCanonicalName(name);
+      setIsClaimingName(false);
+      if (cancelled) return;
+      if (!canonicalName) return;
+
+      setName(canonicalName);
+      setDraftName(canonicalName);
+      setIsNameClaimed(true);
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem("chatroom-name", canonicalName);
+      }
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [name, room, clientId, showNamePrompt, isNameClaimed]);
+
+  const renameCooldownUntil = lastNameChangeAt ? lastNameChangeAt + NAME_CHANGE_COOLDOWN_MS : null;
+  const renameCooldownSeconds =
+    renameCooldownUntil !== null && now < renameCooldownUntil ? Math.ceil((renameCooldownUntil - now) / 1000) : 0;
+  const canChangeName = Boolean(name) && !isClaimingName && renameCooldownSeconds === 0;
+
   const canSend = Boolean(
     name &&
       room &&
       supabase &&
+      isNameClaimed &&
       isSubscribed &&
       isJoined &&
       !(cooldownUntil !== null && now < cooldownUntil)
@@ -443,7 +561,7 @@ export default function Home() {
 
     channel.on("presence", { event: "sync" }, () => {
       const state = channel.presenceState() as Record<string, { name?: string }[]>;
-      const users: Array<{ id: string; name: string; isSelf: boolean }> = [];
+      const users: ConnectedUser[] = [];
 
       Object.entries(state).forEach(([presenceKey, entries]) => {
         entries.forEach((entry, index) => {
@@ -463,29 +581,14 @@ export default function Home() {
         return a.id.localeCompare(b.id);
       });
 
-      const countsByName: Record<string, number> = {};
-      const labelledUsers: ConnectedUser[] = users.map((user) => {
-        const seen = (countsByName[user.name] ?? 0) + 1;
-        countsByName[user.name] = seen;
-        return {
-          id: user.id,
-          name: user.name,
-          displayName: seen === 1 ? user.name : `${user.name} (${seen})`,
-          isSelf: user.isSelf,
-        };
-      });
-
-      setConnected(labelledUsers);
-      setIsJoined(labelledUsers.some((user) => user.isSelf));
+      setConnected(users);
+      setIsJoined(users.some((user) => user.isSelf));
     });
 
     channel.subscribe((status) => {
       if (status === "SUBSCRIBED") {
         setIsSubscribed(true);
         void loadMutedUsers();
-        if (nameRef.current) {
-          channel.track({ name: nameRef.current });
-        }
         return;
       }
       if (status === "CLOSED" || status === "TIMED_OUT" || status === "CHANNEL_ERROR") {
@@ -509,10 +612,14 @@ export default function Home() {
       setIsJoined(false);
       return;
     }
+    if (!isNameClaimed) {
+      setIsJoined(false);
+      return;
+    }
     if (isSubscribed) {
       channelRef.current?.track({ name });
     }
-  }, [name, isSubscribed]);
+  }, [name, isSubscribed, isNameClaimed]);
 
   const broadcastSystemMessage = (content: string) => {
     if (!channelRef.current) return;
@@ -528,16 +635,28 @@ export default function Home() {
     });
   };
 
-  const handleJoin = () => {
+  const handleJoin = async () => {
+    if (typeof window === "undefined") return;
+    if (!roomRef.current || !clientIdRef.current) return;
     const trimmed = draftName.trim();
     if (!trimmed) {
       return;
     }
-    setName(trimmed);
-    window.localStorage.setItem("chatroom-name", trimmed);
+
+    setIsClaimingName(true);
+    const canonicalName = await claimCanonicalName(trimmed);
+    setIsClaimingName(false);
+    if (!canonicalName) {
+      return;
+    }
+
+    setName(canonicalName);
+    setDraftName(canonicalName);
+    setIsNameClaimed(true);
+    window.localStorage.setItem("chatroom-name", canonicalName);
     setShowNamePrompt(false);
-    channelRef.current?.track({ name: trimmed });
-    broadcastSystemMessage(`${trimmed} joined the room.`);
+    channelRef.current?.track({ name: canonicalName });
+    broadcastSystemMessage(`${canonicalName} joined the room.`);
   };
 
   const handleSend = () => {
@@ -613,12 +732,15 @@ export default function Home() {
                   <button
                     className="rounded-full border border-slate-700 bg-slate-900/70 px-3 py-1 text-xs font-medium text-slate-200 transition hover:border-emerald-400 hover:text-emerald-200 disabled:cursor-not-allowed disabled:border-slate-800 disabled:text-slate-500"
                     onClick={handleChangeName}
-                    disabled={!name}
+                    disabled={!canChangeName}
                   >
                     Change name
                   </button>
                   {copyStatus === "copied" && <span className="text-xs text-emerald-300">Copied</span>}
                   {copyStatus === "error" && <span className="text-xs text-rose-300">Copy failed</span>}
+                  {renameCooldownSeconds > 0 && (
+                    <span className="text-xs text-slate-400">Change in {renameCooldownSeconds}s</span>
+                  )}
                 </div>
               </div>
               <span className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1 text-xs text-emerald-200">
@@ -655,6 +777,9 @@ export default function Home() {
                 <p className="mb-3 text-sm text-amber-200">
                   Rejoining the room… If this persists, refresh the page.
                 </p>
+              )}
+              {name && room && !isNameClaimed && (
+                <p className="mb-3 text-sm text-amber-200">Reserving your name in this room…</p>
               )}
               {cooldownUntil && now < cooldownUntil && (
                 <p className="mb-3 text-sm text-rose-200">
@@ -703,7 +828,7 @@ export default function Home() {
                 {connected.map((person) => (
                   <li key={person.id} className="flex items-center justify-between rounded-full bg-slate-900/70 px-4 py-2">
                     <span>
-                      {person.displayName}
+                      {person.name}
                       {person.isSelf ? " (you)" : ""}
                     </span>
                     <span className="text-emerald-300">●</span>
@@ -773,19 +898,24 @@ export default function Home() {
                 onChange={(event) => setRenameDraft(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter") {
-                    handleSaveNameChange();
+                    void handleSaveNameChange();
                   }
                 }}
                 autoFocus
               />
               <button
                 className="rounded-full bg-emerald-400 px-6 py-3 text-sm font-semibold text-slate-900 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
-                onClick={handleSaveNameChange}
-                disabled={!renameDraft.trim() || renameDraft.trim() === name.trim()}
+                onClick={() => void handleSaveNameChange()}
+                disabled={isClaimingName || renameCooldownSeconds > 0 || !renameDraft.trim() || renameDraft.trim() === name.trim()}
               >
-                Save
+                {isClaimingName ? "Saving..." : "Save"}
               </button>
             </div>
+            {renameCooldownSeconds > 0 && (
+              <p className="mt-3 text-sm text-slate-400">
+                You can change your name again in {renameCooldownSeconds} seconds.
+              </p>
+            )}
           </div>
         </div>
       )}
@@ -797,6 +927,7 @@ export default function Home() {
             <p className={`${bodyFont.className} mt-2 text-sm text-slate-400`}>
               This will appear in the chat for everyone in the room.
             </p>
+            {!room && <p className="mt-3 text-sm text-amber-200">Assigning you to a room…</p>}
             <div className="mt-6 flex flex-col gap-4">
               <input
                 className="w-full rounded-2xl border border-slate-700 bg-slate-900/70 px-4 py-3 text-base text-slate-100 placeholder:text-slate-500 focus:border-emerald-400 focus:outline-none"
@@ -805,16 +936,16 @@ export default function Home() {
                 onChange={(event) => setDraftName(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter") {
-                    handleJoin();
+                    void handleJoin();
                   }
                 }}
               />
               <button
                 className="rounded-full bg-emerald-400 px-6 py-3 text-sm font-semibold text-slate-900 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
-                onClick={handleJoin}
-                disabled={!draftName.trim() || !supabase}
+                onClick={() => void handleJoin()}
+                disabled={!draftName.trim() || !supabase || !room || isClaimingName}
               >
-                Join room
+                {isClaimingName ? "Joining..." : "Join room"}
               </button>
             </div>
           </div>
